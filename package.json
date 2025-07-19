@@ -26,10 +26,8 @@
   "author": "Semantest Team",
   "license": "Apache-2.0",
   "dependencies": {
-    "@semantest/browser": "workspace:*",
-    "@typescript-eda/domain": "workspace:*",
-    "@typescript-eda/application": "workspace:*",
-    "@typescript-eda/infrastructure": "workspace:*",
+    "@semantest/browser": "^2.0.0",
+    "@semantest/core": "^1.0.0",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
