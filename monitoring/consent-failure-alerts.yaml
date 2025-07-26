@@ -1,0 +1,148 @@
+# Enhanced Consent System Alert Configuration
+# v1.0.1 - Monitoring telemetryConsentPending and retry logic
+
+alerts:
+  # Critical Alerts - Immediate notification
+  critical:
+    - id: consent_system_down
+      description: "Consent system completely failed"
+      conditions:
+        - failure_count: ">= 10"
+        - time_window: "5 minutes"
+      actions:
+        - notify: ["devops", "engineering", "pm"]
+        - auto_rollback: true
+        - create_incident: true
+
+    - id: retry_loop_infinite
+      description: "Infinite retry loop detected"
+      conditions:
+        - retry_attempts: ">= 20"
+        - pattern: "increasing"
+      actions:
+        - notify: ["engineering"]
+        - capture_logs: true
+        - block_release: true
+
+  # High Priority Alerts
+  high:
+    - id: consent_pending_timeout
+      description: "Consent pending for too long"
+      conditions:
+        - telemetryConsentPending: true
+        - duration: ">= 5 minutes"
+      actions:
+        - notify: ["devops"]
+        - log_level: "error"
+        - metric: "consent_timeout_count"
+
+    - id: excessive_retries
+      description: "Too many retry attempts"
+      conditions:
+        - retry_count: ">= 10"
+        - success: false
+      actions:
+        - notify: ["engineering", "qa"]
+        - investigate: true
+
+  # Warning Alerts
+  warning:
+    - id: interval_drift
+      description: "30-second checks drifting"
+      conditions:
+        - interval: "!= 30s ± 5s"
+        - occurrences: ">= 3"
+      actions:
+        - log_level: "warn"
+        - metric: "interval_drift_count"
+
+    - id: high_decline_rate
+      description: "High consent decline rate"
+      conditions:
+        - decline_rate: ">= 50%"
+        - sample_size: ">= 100"
+      actions:
+        - notify: ["pm", "ux"]
+        - analyze_pattern: true
+
+# Monitoring Metrics
+metrics:
+  consent_pending:
+    - track: "telemetryConsentPending flag changes"
+    - measure: "duration in pending state"
+    - alert_threshold: "5 minutes"
+
+  retry_attempts:
+    - track: "each retry attempt number"
+    - measure: "total retries per session"
+    - alert_threshold: "10 attempts"
+
+  interval_checks:
+    - track: "30-second interval timing"
+    - measure: "drift from expected interval"
+    - alert_threshold: "±5 seconds"
+
+  success_metrics:
+    - track: "consent acceptance rate"
+    - measure: "time to consent"
+    - baseline: "80% acceptance"
+
+# Dashboard Views
+dashboards:
+  consent_health:
+    widgets:
+      - type: "gauge"
+        metric: "consent_success_rate"
+        thresholds:
+          green: ">= 90%"
+          yellow: ">= 70%"
+          red: "< 70%"
+
+      - type: "line_graph"
+        metric: "retry_attempts_over_time"
+        window: "1 hour"
+
+      - type: "status_indicator"
+        checks:
+          - "telemetryConsentPending count"
+          - "average retry attempts"
+          - "30-second interval accuracy"
+
+      - type: "alert_feed"
+        filter: "consent_*"
+        limit: 20
+
+# Notification Channels
+notifications:
+  slack:
+    channel: "#semantest-alerts"
+    critical: true
+    high: true
+    warning: false
+
+  email:
+    recipients:
+      - devops@semantest.com
+      - engineering@semantest.com
+    critical: true
+    high: false
+
+  pagerduty:
+    service: "semantest-production"
+    critical: true
+
+# Auto-Recovery Actions
+recovery:
+  consent_stuck:
+    condition: "telemetryConsentPending = true for 10+ minutes"
+    actions:
+      - "clear_storage_flag"
+      - "restart_consent_flow"
+      - "notify_user"
+
+  retry_exhausted:
+    condition: "retry_attempts >= 30"
+    actions:
+      - "disable_telemetry"
+      - "log_error"
+      - "schedule_fix"

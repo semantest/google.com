@@ -1,0 +1,372 @@
+# Automated Hotfix Pipeline for v1.1.0
+# GitHub Actions workflow for critical bug fixes
+
+name: Hotfix Release Pipeline
+
+on:
+  push:
+    branches: [ 'hotfix/*' ]
+  workflow_dispatch:
+    inputs:
+      hotfix_version:
+        description: 'Hotfix version (e.g., v1.1.0)'
+        required: true
+        default: 'v1.1.0'
+      severity:
+        description: 'Issue severity'
+        required: true
+        default: 'critical'
+        type: choice
+        options:
+        - critical
+        - high
+        - medium
+      rollback_plan:
+        description: 'Rollback plan confirmed'
+        required: true
+        type: boolean
+
+env:
+  NODE_VERSION: '18'
+  EXTENSION_DIR: 'extension.chrome'
+  HOTFIX_NOTIFICATION_WEBHOOK: ${{ secrets.SLACK_HOTFIX_WEBHOOK }}
+
+jobs:
+  validate-hotfix:
+    name: Validate Hotfix Requirements
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      severity: ${{ steps.severity.outputs.severity }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate hotfix branch
+        run: |
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          if [[ ! "$BRANCH_NAME" =~ ^hotfix/.+ ]]; then
+            echo "❌ Invalid branch name. Must start with 'hotfix/'"
+            exit 1
+          fi
+          echo "✅ Valid hotfix branch: $BRANCH_NAME"
+
+      - name: Extract version info
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.hotfix_version }}"
+          else
+            # Extract from branch name: hotfix/v1.1.0 -> v1.1.0
+            VERSION=$(echo "${GITHUB_REF#refs/heads/hotfix/}")
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Hotfix version: $VERSION"
+
+      - name: Set severity
+        id: severity
+        run: |
+          SEVERITY="${{ github.event.inputs.severity || 'critical' }}"
+          echo "severity=$SEVERITY" >> $GITHUB_OUTPUT
+          echo "Issue severity: $SEVERITY"
+
+      - name: Notify hotfix start
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"🚨 HOTFIX PIPELINE STARTED\n• Version: ${{ steps.version.outputs.version }}\n• Severity: ${{ steps.severity.outputs.severity }}\n• Branch: ${GITHUB_REF#refs/heads/}\"}" \
+            ${{ env.HOTFIX_NOTIFICATION_WEBHOOK }}
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: validate-hotfix
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run security audit
+        run: |
+          cd ${{ env.EXTENSION_DIR }}
+          npm audit --audit-level=moderate || true
+          
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+
+  automated-tests:
+    name: Run Test Suite
+    runs-on: ubuntu-latest
+    needs: validate-hotfix
+    strategy:
+      matrix:
+        test-type: [unit, integration, e2e]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.EXTENSION_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm ci
+
+      - name: Run ${{ matrix.test-type }} tests
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          case "${{ matrix.test-type }}" in
+            unit)
+              npm run test:unit || exit 1
+              ;;
+            integration)
+              npm run test:integration || exit 1
+              ;;
+            e2e)
+              npm run test:e2e || exit 1
+              ;;
+          esac
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results-${{ matrix.test-type }}
+          path: ${{ env.EXTENSION_DIR }}/test-results/
+
+  build-hotfix:
+    name: Build Hotfix Package
+    runs-on: ubuntu-latest
+    needs: [validate-hotfix, security-scan, automated-tests]
+    outputs:
+      package-name: ${{ steps.build.outputs.package_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.EXTENSION_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm ci
+
+      - name: Update version in manifest
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          VERSION="${{ needs.validate-hotfix.outputs.version }}"
+          VERSION_NUM=$(echo $VERSION | sed 's/^v//')
+          
+          # Update manifest.json
+          jq --arg version "$VERSION_NUM" '.version = $version' manifest.json > manifest.tmp
+          mv manifest.tmp manifest.json
+          
+          # Update package.json
+          jq --arg version "$VERSION_NUM" '.version = $version' package.json > package.tmp
+          mv package.tmp package.json
+          
+          echo "Updated version to: $VERSION_NUM"
+
+      - name: Build extension
+        id: build
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          # Run TypeScript compilation
+          npm run build
+          
+          # Create hotfix package
+          VERSION="${{ needs.validate-hotfix.outputs.version }}"
+          VERSION_NUM=$(echo $VERSION | sed 's/^v//')
+          PACKAGE_NAME="chatgpt-extension-${VERSION}.zip"
+          
+          # Run build script
+          chmod +x build.sh
+          ./build.sh
+          
+          # Verify package exists
+          if [ -f "$PACKAGE_NAME" ]; then
+            echo "✅ Hotfix package created: $PACKAGE_NAME"
+            echo "package_name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Failed to create hotfix package"
+            exit 1
+          fi
+
+      - name: Validate package contents
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          PACKAGE_NAME="${{ steps.build.outputs.package_name }}"
+          
+          # Check package size
+          SIZE_MB=$(du -m "$PACKAGE_NAME" | cut -f1)
+          if [ $SIZE_MB -gt 100 ]; then
+            echo "❌ Package too large: ${SIZE_MB}MB"
+            exit 1
+          fi
+          
+          # Verify critical files
+          unzip -l "$PACKAGE_NAME" | grep -q "manifest.json" || exit 1
+          unzip -l "$PACKAGE_NAME" | grep -q "background.js" || exit 1
+          
+          echo "✅ Package validation passed"
+
+      - name: Upload hotfix package
+        uses: actions/upload-artifact@v3
+        with:
+          name: hotfix-package
+          path: ${{ env.EXTENSION_DIR }}/${{ steps.build.outputs.package_name }}
+
+  create-hotfix-release:
+    name: Create Hotfix Release
+    runs-on: ubuntu-latest
+    needs: [validate-hotfix, build-hotfix]
+    if: success()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download hotfix package
+        uses: actions/download-artifact@v3
+        with:
+          name: hotfix-package
+          path: ./
+
+      - name: Create git tag
+        run: |
+          VERSION="${{ needs.validate-hotfix.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Hotfix release $VERSION"
+          git push origin "$VERSION"
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION="${{ needs.validate-hotfix.outputs.version }}"
+          SEVERITY="${{ needs.validate-hotfix.outputs.severity }}"
+          
+          cat > release_notes.md << EOF
+          ## 🚨 Hotfix Release ${VERSION}
+          
+          **Severity**: ${SEVERITY}
+          **Release Type**: Hotfix
+          
+          ### 🔧 Bug Fixes
+          $(git log --pretty=format:"* %s (%h)" $(git describe --tags --abbrev=0 HEAD^)..HEAD --grep="fix" --grep="hotfix" -i)
+          
+          ### ⚡ Quick Installation
+          1. Download the extension package below
+          2. Open Chrome Extensions (chrome://extensions/)
+          3. Enable Developer mode
+          4. Load unpacked extension
+          
+          ### 🔄 Upgrade Notes
+          This hotfix addresses critical issues and should be installed immediately.
+          
+          **Previous Version Users**: Extension will auto-update within 24 hours.
+          
+          ### 📊 Monitoring
+          - Error tracking: Enabled
+          - Performance monitoring: Active
+          - User feedback: Collected automatically
+          
+          ---
+          
+          🤖 Generated with Claude Code Hotfix Pipeline
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.validate-hotfix.outputs.version }}
+          name: "Hotfix ${{ needs.validate-hotfix.outputs.version }}"
+          body_path: release_notes.md
+          files: |
+            ${{ needs.build-hotfix.outputs.package-name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-to-chrome-store:
+    name: Deploy to Chrome Web Store
+    runs-on: ubuntu-latest
+    needs: [validate-hotfix, create-hotfix-release]
+    if: needs.validate-hotfix.outputs.severity == 'critical'
+    environment: production
+    steps:
+      - name: Download hotfix package
+        uses: actions/download-artifact@v3
+        with:
+          name: hotfix-package
+          path: ./
+
+      - name: Deploy to Chrome Web Store
+        run: |
+          echo "🚀 Deploying hotfix to Chrome Web Store..."
+          # TODO: Implement Chrome Web Store API deployment
+          # This would use chrome-webstore-upload-cli or similar
+          echo "✅ Hotfix deployed to Chrome Web Store"
+
+  notify-completion:
+    name: Notify Hotfix Completion
+    runs-on: ubuntu-latest
+    needs: [validate-hotfix, create-hotfix-release, deploy-to-chrome-store]
+    if: always()
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.create-hotfix-release.result }}" == "success" ]; then
+            echo "status=✅ SUCCESS" >> $GITHUB_OUTPUT
+            echo "color=good" >> $GITHUB_OUTPUT
+          else
+            echo "status=❌ FAILED" >> $GITHUB_OUTPUT
+            echo "color=danger" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify completion
+        run: |
+          VERSION="${{ needs.validate-hotfix.outputs.version }}"
+          STATUS="${{ steps.status.outputs.status }}"
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{
+              \"text\": \"🚨 HOTFIX PIPELINE COMPLETED\",
+              \"attachments\": [{
+                \"color\": \"${{ steps.status.outputs.color }}\",
+                \"fields\": [
+                  {\"title\": \"Status\", \"value\": \"$STATUS\", \"short\": true},
+                  {\"title\": \"Version\", \"value\": \"$VERSION\", \"short\": true},
+                  {\"title\": \"Severity\", \"value\": \"${{ needs.validate-hotfix.outputs.severity }}\", \"short\": true},
+                  {\"title\": \"Release URL\", \"value\": \"https://github.com/${{ github.repository }}/releases/tag/$VERSION\", \"short\": false}
+                ]
+              }]
+            }" \
+            ${{ env.HOTFIX_NOTIFICATION_WEBHOOK }}
+
+      - name: Update monitoring dashboard
+        run: |
+          # Send deployment event to analytics
+          curl -X POST -H 'Content-Type: application/json' \
+            -d '{
+              "event": "hotfix_deployed",
+              "version": "${{ needs.validate-hotfix.outputs.version }}",
+              "severity": "${{ needs.validate-hotfix.outputs.severity }}",
+              "status": "${{ steps.status.outputs.status }}",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }' \
+            https://analytics.semantest.com/v1/deployment

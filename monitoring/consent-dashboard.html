@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Semantest v1.0.1 - Enhanced Consent Monitoring</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #0f0f0f;
+            color: #e0e0e0;
+        }
+        
+        .header {
+            text-align: center;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .metric-card {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 20px;
+            transition: transform 0.2s;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-2px);
+            border-color: #667eea;
+        }
+        
+        .metric-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        
+        .metric-label {
+            color: #888;
+            font-size: 0.9em;
+            text-transform: uppercase;
+        }
+        
+        .status-good { color: #4ade80; }
+        .status-warning { color: #fbbf24; }
+        .status-critical { color: #f87171; }
+        
+        .alert-section {
+            background: #1a1a1a;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .alert-item {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .alert-critical {
+            background: rgba(248, 113, 113, 0.1);
+            border-left: 4px solid #f87171;
+        }
+        
+        .alert-warning {
+            background: rgba(251, 191, 36, 0.1);
+            border-left: 4px solid #fbbf24;
+        }
+        
+        .retry-chart {
+            height: 200px;
+            background: #1a1a1a;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .live-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #4ade80;
+            border-radius: 50%;
+            margin-right: 5px;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚀 Semantest v1.0.1 - Enhanced Consent Monitoring</h1>
+        <p><span class="live-indicator"></span>Live Dashboard - Monitoring telemetryConsentPending</p>
+    </div>
+
+    <div class="metrics-grid">
+        <div class="metric-card">
+            <div class="metric-label">Consent Pending Count</div>
+            <div class="metric-value status-good" id="pending-count">0</div>
+            <small>Active pending states</small>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">Retry Attempts</div>
+            <div class="metric-value" id="retry-count">0</div>
+            <small>Max: <span id="max-retries">0</span></small>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">30s Interval Checks</div>
+            <div class="metric-value status-good" id="interval-checks">✓</div>
+            <small>Last: <span id="last-check">Never</span></small>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">Success Rate</div>
+            <div class="metric-value" id="success-rate">--</div>
+            <small>Consent acceptance</small>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">Failures</div>
+            <div class="metric-value status-good" id="failure-count">0</div>
+            <small>Total failures</small>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">System Status</div>
+            <div class="metric-value status-good" id="system-status">✅</div>
+            <small>Overall health</small>
+        </div>
+    </div>
+
+    <div class="alert-section">
+        <h2>🚨 Active Alerts</h2>
+        <div id="alerts-container">
+            <div class="alert-item alert-warning">
+                <span>ℹ️ Monitoring enhanced consent system...</span>
+                <span>Now</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="retry-chart">
+        <h3>Retry Attempts Over Time</h3>
+        <canvas id="retry-chart"></canvas>
+    </div>
+
+    <div class="alert-section">
+        <h2>📊 Consent Flow Metrics</h2>
+        <div id="flow-metrics">
+            <p>📍 telemetryConsentPending: <span id="pending-status">false</span></p>
+            <p>⏱️ Average time in pending: <span id="avg-pending">0s</span></p>
+            <p>🔄 Average retries needed: <span id="avg-retries">0</span></p>
+            <p>✅ Successful consents: <span id="success-count">0</span></p>
+            <p>❌ Failed consents: <span id="failed-count">0</span></p>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket connection for real-time updates
+        const ws = new WebSocket('ws://localhost:3001');
+        
+        ws.onopen = () => {
+            console.log('Connected to monitoring server');
+            updateStatus('system-status', '✅', 'status-good');
+        };
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            updateDashboard(data);
+        };
+        
+        ws.onerror = () => {
+            updateStatus('system-status', '❌', 'status-critical');
+            addAlert('Connection lost to monitoring server', 'critical');
+        };
+        
+        function updateDashboard(data) {
+            // Update metrics
+            if (data.metrics) {
+                updateMetric('pending-count', data.metrics.pendingCount || 0);
+                updateMetric('retry-count', data.metrics.retryCount || 0);
+                updateMetric('max-retries', data.metrics.maxRetries || 0);
+                updateMetric('success-rate', data.metrics.successRate ? data.metrics.successRate + '%' : '--');
+                updateMetric('failure-count', data.metrics.failures || 0);
+                
+                // Update status colors
+                if (data.metrics.failures > 0) {
+                    document.getElementById('failure-count').className = 'metric-value status-critical';
+                }
+                
+                if (data.metrics.maxRetries > 10) {
+                    document.getElementById('retry-count').className = 'metric-value status-warning';
+                }
+            }
+            
+            // Update alerts
+            if (data.alert) {
+                addAlert(data.alert.message, data.alert.severity);
+            }
+            
+            // Update consent flow metrics
+            if (data.consentFlow) {
+                updateMetric('pending-status', data.consentFlow.pendingStatus ? 'true' : 'false');
+                updateMetric('avg-pending', data.consentFlow.avgPendingTime + 's');
+                updateMetric('avg-retries', data.consentFlow.avgRetries);
+                updateMetric('success-count', data.consentFlow.successCount);
+                updateMetric('failed-count', data.consentFlow.failedCount);
+            }
+            
+            // Update interval check status
+            if (data.intervalCheck) {
+                const now = new Date().toLocaleTimeString();
+                updateMetric('last-check', now);
+                
+                if (data.intervalCheck.onSchedule) {
+                    updateStatus('interval-checks', '✓', 'status-good');
+                } else {
+                    updateStatus('interval-checks', '⚠️', 'status-warning');
+                    addAlert('30-second interval check off schedule', 'warning');
+                }
+            }
+        }
+        
+        function updateMetric(id, value) {
+            const element = document.getElementById(id);
+            if (element) {
+                element.textContent = value;
+            }
+        }
+        
+        function updateStatus(id, value, className) {
+            const element = document.getElementById(id);
+            if (element) {
+                element.textContent = value;
+                element.className = 'metric-value ' + className;
+            }
+        }
+        
+        function addAlert(message, severity) {
+            const container = document.getElementById('alerts-container');
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert-item alert-${severity}`;
+            
+            const icon = severity === 'critical' ? '🚨' : '⚠️';
+            const time = new Date().toLocaleTimeString();
+            
+            alertDiv.innerHTML = `
+                <span>${icon} ${message}</span>
+                <span>${time}</span>
+            `;
+            
+            container.insertBefore(alertDiv, container.firstChild);
+            
+            // Keep only last 10 alerts
+            while (container.children.length > 10) {
+                container.removeChild(container.lastChild);
+            }
+        }
+        
+        // Simulate real-time updates for demo
+        setInterval(() => {
+            const mockData = {
+                metrics: {
+                    pendingCount: Math.floor(Math.random() * 3),
+                    retryCount: Math.floor(Math.random() * 5),
+                    maxRetries: Math.floor(Math.random() * 8),
+                    successRate: Math.floor(Math.random() * 20 + 80),
+                    failures: 0
+                }
+            };
+            updateDashboard(mockData);
+        }, 5000);
+    </script>
+</body>
+</html>

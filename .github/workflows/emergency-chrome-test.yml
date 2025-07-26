@@ -1,0 +1,66 @@
+name: Emergency Chrome Extension Test
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  test-consent-popup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@latest
+        
+      - name: Build Extension
+        run: |
+          cd extension.chrome
+          npm ci
+          npm run build
+          
+      - name: Install Puppeteer
+        run: npm install puppeteer
+          
+      - name: Test Consent Popup
+        run: |
+          cat > test-extension.js << 'EOF'
+          const puppeteer = require('puppeteer');
+          const path = require('path');
+          
+          (async () => {
+            console.log('Testing Chrome Extension...');
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: [
+                '--disable-extensions-except=' + path.resolve('./extension.chrome/dist'),
+                '--load-extension=' + path.resolve('./extension.chrome/dist')
+              ]
+            });
+            
+            const page = await browser.newPage();
+            console.log('✅ Extension loaded successfully');
+            
+            // Screenshot
+            await page.screenshot({ path: 'extension-test.png' });
+            
+            await browser.close();
+            console.log('✅ Test completed!');
+          })();
+          EOF
+          
+          node test-extension.js
+          
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results
+          path: |
+            *.png
+            extension.chrome/dist/

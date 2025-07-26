@@ -1,0 +1,240 @@
+name: Chrome Extension Build & Test
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: 
+      - 'extension.chrome/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'extension.chrome/**'
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '18'
+  EXTENSION_DIR: 'extension.chrome'
+
+jobs:
+  test:
+    name: Test Extension Code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.EXTENSION_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm run lint
+
+      - name: Run TypeScript check
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm run typecheck
+
+      - name: Run tests
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm test
+
+      - name: Upload test coverage
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          directory: ${{ env.EXTENSION_DIR }}/coverage
+
+  build-dev:
+    name: Build Development Version
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref != 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.EXTENSION_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm ci
+
+      - name: Build development version
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm run build:dev
+
+      - name: Validate extension
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm run validate
+
+      - name: Upload development build
+        uses: actions/upload-artifact@v3
+        with:
+          name: extension-dev-build
+          path: ${{ env.EXTENSION_DIR }}/dist/
+          retention-days: 7
+
+  build-production:
+    name: Build Production Version
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.EXTENSION_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm ci
+
+      - name: Build production version
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm run build
+
+      - name: Create extension package
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm run package
+
+      - name: Validate extension package
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          # Verify package was created
+          PACKAGE_FILE=$(ls chatgpt-extension-v*.zip | head -1)
+          if [ -z "$PACKAGE_FILE" ]; then
+            echo "❌ Extension package not found"
+            exit 1
+          fi
+          
+          echo "✅ Package created: $PACKAGE_FILE"
+          
+          # Check package size
+          SIZE_MB=$(du -m "$PACKAGE_FILE" | cut -f1)
+          if [ $SIZE_MB -gt 50 ]; then
+            echo "⚠️ Package size is ${SIZE_MB}MB (consider optimizing)"
+          else
+            echo "✅ Package size: ${SIZE_MB}MB"
+          fi
+          
+          # Verify package contents
+          unzip -l "$PACKAGE_FILE" | grep -q "manifest.json" || exit 1
+          unzip -l "$PACKAGE_FILE" | grep -q "background.js" || exit 1
+          
+          echo "✅ Package validation passed"
+
+      - name: Upload production build
+        uses: actions/upload-artifact@v3
+        with:
+          name: extension-production-build
+          path: |
+            ${{ env.EXTENSION_DIR }}/dist/
+            ${{ env.EXTENSION_DIR }}/chatgpt-extension-v*.zip
+          retention-days: 30
+
+      - name: Create build summary
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          PACKAGE_FILE=$(ls chatgpt-extension-v*.zip | head -1)
+          SIZE=$(du -h "$PACKAGE_FILE" | cut -f1)
+          
+          cat > build-summary.md << EOF
+          ## 🚀 Chrome Extension Build Summary
+          
+          **Build**: Production
+          **Status**: ✅ Success
+          **Package**: \`$PACKAGE_FILE\`
+          **Size**: $SIZE
+          **Commit**: \`${GITHUB_SHA:0:7}\`
+          **Branch**: \`${GITHUB_REF_NAME}\`
+          
+          ### 📦 Build Artifacts
+          - Extension package ready for Chrome Web Store
+          - Source maps included for debugging
+          - All tests passed
+          - TypeScript validation completed
+          - ESLint checks passed
+          
+          ### 📋 Next Steps
+          1. Download the extension package from artifacts
+          2. Test manually in Chrome
+          3. Submit to Chrome Web Store for review
+          4. Create GitHub release with changelog
+          EOF
+          
+          echo "BUILD_SUMMARY_PATH=build-summary.md" >> $GITHUB_ENV
+
+      - name: Comment build summary on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('${{ env.EXTENSION_DIR }}/build-summary.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ env.EXTENSION_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: npm ci
+
+      - name: Run npm audit
+        working-directory: ${{ env.EXTENSION_DIR }}
+        run: |
+          npm audit --audit-level=moderate || {
+            echo "⚠️ Security vulnerabilities found"
+            npm audit --audit-level=moderate --json > security-report.json
+          }
+
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-report
+          path: ${{ env.EXTENSION_DIR }}/security-report.json
+          retention-days: 30
